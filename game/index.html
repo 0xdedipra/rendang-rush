@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rendang Rush · Dapur Nusantara</title>
+<link rel="icon" href="data:,">
+<style>
+  html,body{margin:0;padding:0;background:#1d1008;height:100%;overflow:hidden;
+    font-family:"Trebuchet MS","Segoe UI",Verdana,sans-serif;}
+  #wrap{display:flex;align-items:center;justify-content:center;height:100vh;
+    background:radial-gradient(1200px 700px at 50% 30%, #3a2110 0%, #1d1008 70%);}
+  canvas{width:min(100vw,160vh);height:auto;aspect-ratio:1280/800;display:block;
+    border-radius:10px;box-shadow:0 24px 70px rgba(0,0,0,.65),0 0 0 4px #0d0603;
+    cursor:pointer;touch-action:none;}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv" width="1280" height="800"></canvas></div>
+<script>
+"use strict";
+/* ============================================================
+   RENDANG RUSH · Dapur Nusantara
+   An original Indonesian cooking game. Canvas only, no assets.
+   ============================================================ */
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const W = 1280, H = 800;
+
+/* ---------------- Ingredients & recipes ---------------- */
+const ING = [
+  {id:"rice",   name:"Nasi",         key:"1", col:"#f7f3e6", dark:"#d9d2ba"},
+  {id:"beef",   name:"Daging Sapi",  key:"2", col:"#8a3b2a", dark:"#5f271b"},
+  {id:"chicken",name:"Ayam",         key:"3", col:"#e8b06a", dark:"#b57f3a"},
+  {id:"noodle", name:"Mie",          key:"4", col:"#f2c94c", dark:"#c79a26"},
+  {id:"egg",    name:"Telur",        key:"5", col:"#fff6da", dark:"#e8a91c"},
+  {id:"spice",  name:"Bumbu Rempah", key:"6", col:"#c0392b", dark:"#7e1f14"},
+  {id:"kecap",  name:"Kecap Manis",  key:"7", col:"#3a2317", dark:"#1d0f08"},
+  {id:"santan", name:"Santan",       key:"8", col:"#fdf6ec", dark:"#e3cfa8"},
+];
+const ING_BY_ID = {}; ING.forEach(i => ING_BY_ID[i.id] = i);
+const STOVE = "STOVE";
+const RECIPES = {
+  "Rendang":     {steps:["beef","spice","santan",STOVE],        price:60, col:"#a04028"},
+  "Nasi Goreng": {steps:["rice","kecap","egg",STOVE],           price:45, col:"#d35400"},
+  "Sate Ayam":   {steps:["chicken","spice",STOVE,"kecap"],      price:50, col:"#b9770e"},
+  "Mie Goreng":  {steps:["noodle","kecap","egg",STOVE],         price:45, col:"#c79a26"},
+  "Rendang Spesial": {steps:["beef","spice","santan",STOVE,"egg"], price:80, col:"#7e1f14"},
+  "Nasi Komplit":    {steps:["rice","chicken","spice",STOVE,"egg"],price:75, col:"#1e8449"},
+};
+const DISH_NAMES = Object.keys(RECIPES);
+
+/* ---------------- Tiny WebAudio synth ---------------- */
+let AC = null;
+function audio(){ if(!AC){ try{ AC = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} }
+  if(AC && AC.state === "suspended") AC.resume(); return AC; }
+function beep(freq, t0, dur, type, vol, slide){
+  const ac = audio(); if(!ac) return;
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.type = type || "sine"; o.frequency.setValueAtTime(freq, ac.currentTime + t0);
+  if(slide) o.frequency.exponentialRampToValueAtTime(slide, ac.currentTime + t0 + dur);
+  g.gain.setValueAtTime(0.0001, ac.currentTime + t0);
+  g.gain.exponentialRampToValueAtTime(vol || 0.12, ac.currentTime + t0 + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + t0 + dur);
+  o.connect(g); g.connect(ac.destination); o.start(ac.currentTime + t0); o.stop(ac.currentTime + t0 + dur + 0.05);
+}
+let sizzleNode = null;
+function sizzle(on){
+  const ac = audio(); if(!ac) return;
+  if(on && !sizzleNode){
+    const len = ac.sampleRate * 1.2, buf = ac.createBuffer(1, len, ac.sampleRate);
+    const d = buf.getChannelData(0); for(let i=0;i<len;i++) d[i] = Math.random()*2-1;
+    const src = ac.createBufferSource(); src.buffer = buf; src.loop = true;
+    const f = ac.createBiquadFilter(); f.type = "highpass"; f.frequency.value = 3800;
+    const g = ac.createGain(); g.gain.value = 0.045;
+    src.connect(f); f.connect(g); g.connect(ac.destination); src.start();
+    sizzleNode = {src, g};
+  } else if(!on && sizzleNode){
+    try{ sizzleNode.g.gain.value = 0; sizzleNode.src.stop(); }catch(e){}
+    sizzleNode = null;
+  }
+}
+const sfx = {
+  pick(){ beep(520, 0, 0.07, "triangle", 0.10); beep(760, 0.04, 0.06, "triangle", 0.07); },
+  bad(){ beep(160, 0, 0.18, "sawtooth", 0.10, 90); },
+  ding(){ [660, 880, 990, 1320].forEach((f,i)=>beep(f, i*0.07, 0.16, "sine", 0.11)); },
+  coin(){ beep(1180, 0, 0.09, "square", 0.06); beep(1560, 0.07, 0.14, "square", 0.06); },
+  trash(){ beep(300, 0, 0.12, "triangle", 0.10, 120); },
+  pop(){ beep(420, 0, 0.06, "sine", 0.10, 700); },
+  leave(){ beep(340, 0, 0.16, "sine", 0.09, 180); },
+};
+
+/* ---------------- Drawing helpers ---------------- */
+function rr(x, y, w, h, r){
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y, x+w, y+h, r); ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r); ctx.arcTo(x, y, x+w, y, r);
+  ctx.closePath();
+}
+function circle(x, y, r){ ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); }
+function text(str, x, y, size, col, align, weight, font){
+  ctx.fillStyle = col; ctx.font = (weight||"bold") + " " + size + "px " + (font||'"Trebuchet MS","Segoe UI",Verdana,sans-serif');
+  ctx.textAlign = align || "center"; ctx.textBaseline = "middle"; ctx.fillText(str, x, y);
+}
+/* Draw one ingredient icon centred at (x,y), box size s. Pure shapes. */
+function drawIng(id, x, y, s){
+  const h = s/2;
+  ctx.save(); ctx.translate(x, y);
+  if(id === "rice"){
+    ctx.fillStyle = "#ffffff"; circle(0, h*0.25, h*0.78); ctx.fill();
+    ctx.fillStyle = "#f1ead2"; circle(-h*0.3, -h*0.05, h*0.5); ctx.fill(); circle(h*0.32, -h*0.02, h*0.48); ctx.fill();
+    ctx.fillStyle = "#ffffff"; circle(0, -h*0.32, h*0.55); ctx.fill();
+    ctx.strokeStyle = "#d9d2ba"; ctx.lineWidth = 2;
+    [[-8,-6],[4,-10],[10,2],[-2,4]].forEach(p=>{ ctx.beginPath(); ctx.ellipse(p[0]*s/44, p[1]*s/44, 4.5*s/44, 2.2*s/44, 0.6, 0, Math.PI*2); ctx.stroke(); });
+  } else if(id === "beef"){
+    ctx.fillStyle = "#8a3b2a";
+    [[-h*0.42,-h*0.1,h*0.52],[h*0.05,-h*0.34,h*0.46],[h*0.34,h*0.24,h*0.5],[-h*0.2,h*0.36,h*0.44]].forEach(c=>{ circle(c[0], c[1], c[2]); ctx.fill(); });
+    ctx.fillStyle = "#c96f52";
+    [[-h*0.42,-h*0.1,h*0.2],[h*0.34,h*0.24,h*0.18]].forEach(c=>{ circle(c[0], c[1], c[2]); ctx.fill(); });
+    ctx.strokeStyle = "#e8b4a0"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-h*0.6, h*0.3); ctx.quadraticCurveTo(0, -h*0.5, h*0.55, -h*0.25); ctx.stroke();
+  } else if(id === "chicken"){
+    ctx.fillStyle = "#e8b06a";
+    ctx.beginPath(); ctx.ellipse(-h*0.1, 0, h*0.72, h*0.52, -0.4, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = "#f6cf92"; circle(h*0.42, h*0.34, h*0.3); ctx.fill();
+    ctx.fillStyle = "#fff3dd"; circle(h*0.55, h*0.48, h*0.17); ctx.fill();
+    ctx.strokeStyle = "#b57f3a"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-h*0.6, -h*0.3); ctx.quadraticCurveTo(0, -h*0.05, h*0.3, -h*0.42); ctx.stroke();
+  } else if(id === "noodle"){
+    ctx.strokeStyle = "#f2c94c"; ctx.lineWidth = 3.4; ctx.lineCap = "round";
+    for(let i=0;i<4;i++){
+      ctx.beginPath();
+      const yy = -h*0.42 + i*h*0.28;
+      ctx.moveTo(-h*0.7, yy);
+      ctx.bezierCurveTo(-h*0.3, yy-h*0.3, h*0.1, yy+h*0.3, h*0.45, yy-h*0.08);
+      ctx.bezierCurveTo(h*0.6, yy-h*0.2, h*0.68, yy+h*0.05, h*0.72, yy);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = "#c79a26"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-h*0.7, h*0.55); ctx.quadraticCurveTo(0, h*0.85, h*0.7, h*0.55); ctx.stroke();
+  } else if(id === "egg"){
+    ctx.fillStyle = "#ffffff"; ctx.beginPath();
+    ctx.ellipse(0, 0, h*0.8, h*0.62, 0.3, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = "#e6ddc4"; ctx.lineWidth = 2; ctx.stroke();
+    const g = ctx.createRadialGradient(-h*0.08, -h*0.08, 2, 0, 0, h*0.42);
+    g.addColorStop(0, "#ffd94d"); g.addColorStop(1, "#f39c12");
+    ctx.fillStyle = g; circle(h*0.05, h*0.02, h*0.4); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.55)"; circle(-h*0.05, -h*0.12, h*0.12); ctx.fill();
+  } else if(id === "spice"){
+    ctx.fillStyle = "#7e1f14"; ctx.beginPath();
+    ctx.moveTo(-h*0.7, h*0.55); ctx.quadraticCurveTo(0, h*0.95, h*0.7, h*0.55);
+    ctx.quadraticCurveTo(h*0.55, -h*0.1, 0, -h*0.15); ctx.quadraticCurveTo(-h*0.55, -h*0.1, -h*0.7, h*0.55);
+    ctx.fill();
+    ctx.fillStyle = "#c0392b"; circle(0, -h*0.28, h*0.34); ctx.fill();
+    ctx.fillStyle = "#e74c3c"; circle(-h*0.3, -h*0.1, h*0.2); ctx.fill(); circle(h*0.32, -h*0.05, h*0.22); ctx.fill();
+    ctx.strokeStyle = "#27ae60"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(0, -h*0.55); ctx.quadraticCurveTo(h*0.15, -h*0.8, h*0.4, -h*0.78); ctx.stroke();
+    ctx.fillStyle = "#f39c12";
+    [[-h*0.45,h*0.3],[h*0.1,h*0.42],[h*0.48,h*0.2]].forEach(p=>{ circle(p[0], p[1], 2.4); ctx.fill(); });
+  } else if(id === "kecap"){
+    ctx.fillStyle = "#2a1a10"; rr(-h*0.34, -h*0.28, h*0.68, h*0.85, 5); ctx.fill();
+    ctx.fillStyle = "#4a2c17"; rr(-h*0.14, -h*0.62, h*0.28, h*0.36, 3); ctx.fill();
+    ctx.fillStyle = "#c0392b"; rr(-h*0.2, -h*0.78, h*0.4, h*0.18, 3); ctx.fill();
+    ctx.fillStyle = "#f7e8c9"; rr(-h*0.24, -h*0.05, h*0.48, h*0.42, 3); ctx.fill();
+    text("K", 0, h*0.16, s*0.34, "#7e1f14");
+    ctx.fillStyle = "rgba(255,255,255,.28)"; rr(-h*0.27, -h*0.2, h*0.1, h*0.6, 3); ctx.fill();
+  } else if(id === "santan"){
+    ctx.fillStyle = "#6e4a2f"; ctx.beginPath();
+    ctx.moveTo(-h*0.75, -h*0.1); ctx.quadraticCurveTo(0, h*0.35, h*0.75, -h*0.1);
+    ctx.quadraticCurveTo(h*0.6, h*0.6, 0, h*0.62); ctx.quadraticCurveTo(-h*0.6, h*0.6, -h*0.75, -h*0.1); ctx.fill();
+    ctx.fillStyle = "#fdf6ec"; ctx.beginPath(); ctx.ellipse(0, -h*0.08, h*0.72, h*0.2, 0, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = "#27ae60"; ctx.lineWidth = 3; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(h*0.1, -h*0.3); ctx.quadraticCurveTo(h*0.5, -h*0.75, h*0.78, -h*0.6); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-h*0.15, -h*0.28); ctx.quadraticCurveTo(-h*0.45, -h*0.7, -h*0.72, -h*0.5); ctx.stroke();
+  }
+  ctx.restore();
+}
+/* Stove/flame glyph for recipe steps and the stove button. */
+function drawFlame(x, y, s, flick){
+  ctx.save(); ctx.translate(x, y);
+  const f = flick ? (Math.sin(performance.now()/90) * 0.08 + 1) : 1;
+  ctx.scale(f, f);
+  const g = ctx.createLinearGradient(0, s*0.5, 0, -s*0.55);
+  g.addColorStop(0, "#e67e22"); g.addColorStop(0.55, "#f39c12"); g.addColorStop(1, "#f9e04b");
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(0, -s*0.55);
+  ctx.bezierCurveTo(s*0.34, -s*0.1, s*0.3, s*0.28, 0, s*0.45);
+  ctx.bezierCurveTo(-s*0.3, s*0.28, -s*0.34, -s*0.1, 0, -s*0.55);
+  ctx.fill();
+  ctx.fillStyle = "#fff3b0";
+  ctx.beginPath();
+  ctx.moveTo(0, -s*0.12);
+  ctx.bezierCurveTo(s*0.16, s*0.08, s*0.13, s*0.26, 0, s*0.34);
+  ctx.bezierCurveTo(-s*0.13, s*0.26, -s*0.16, s*0.08, 0, -s*0.12);
+  ctx.fill();
+  ctx.restore();
+}
+/* ---------------- Game state ---------------- */
+const S = {
+  mode: "title",            // title | play | over | shot
+  paused: false,
+  time: 90, score: 0, coins: 0, served: 0, combo: 0, bestCombo: 0, level: 1,
+  orders: [],               // {dish, steps, patience, maxPatience, x}
+  plate: [],                // placed steps (ingredient ids, STOVE once cooked)
+  cooking: null,            // {t, dur} while on the stove
+  cookedReady: false,       // stove step done, waiting to be plated
+  burnt: false,
+  popups: [],               // {x,y,str,col,t}
+  shake: 0, flashServe: 0,
+  spawnT: 0, elapsed: 0,
+  readyPlate: null,         // staged finished plate (shot mode only)
+};
+const COOK_DUR = 2.6, GREEN_A = 0.55, GREEN_B = 0.88; // green zone of the ring
+
+function resetGame(){
+  S.time = 90; S.score = 0; S.coins = 0; S.served = 0; S.combo = 0; S.bestCombo = 0;
+  S.level = 1; S.orders = []; S.plate = []; S.cooking = null; S.cookedReady = false;
+  S.burnt = false; S.popups = []; S.spawnT = 0.4; S.elapsed = 0; S.paused = false;
+}
+function patienceFor(){ return Math.max(13, 24 - (S.level - 1) * 2.2); }
+function pickDish(){
+  const pool = S.level >= 3 ? DISH_NAMES : DISH_NAMES.slice(0, 4);
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+function spawnOrder(forceDish){
+  if(S.orders.length >= 3) return;
+  const dish = forceDish || pickDish();
+  const p = patienceFor() * (0.9 + Math.random() * 0.25);
+  S.orders.push({dish, steps: RECIPES[dish].steps.slice(), patience: p, maxPatience: p});
+  sfx.pop();
+}
+function popup(x, y, str, col){ S.popups.push({x, y, str, col, t: 0}); }
+function nextNeeded(){
+  // first order whose steps match the plate prefix is the "target" order
+  for(const o of S.orders){
+    let ok = true;
+    for(let i = 0; i < S.plate.length; i++) if(S.plate[i] !== o.steps[i]) { ok = false; break; }
+    if(ok) return {order: o, step: o.steps[S.plate.length]};
+  }
+  return null;
+}
+function plateMatches(o){ return S.plate.length === o.steps.length && o.steps.every((s, i) => S.plate[i] === s); }
+
+/* ---------------- Scene drawing ---------------- */
+function drawKitchen(){
+  // tiled wall
+  const wall = ctx.createLinearGradient(0, 0, 0, 560);
+  wall.addColorStop(0, "#f3e2c2"); wall.addColorStop(1, "#e6c491");
+  ctx.fillStyle = wall; ctx.fillRect(0, 0, W, 560);
+  ctx.strokeStyle = "rgba(160,110,60,.25)"; ctx.lineWidth = 2;
+  for(let x = 0; x <= W; x += 80){ ctx.beginPath(); ctx.moveTo(x, 150); ctx.lineTo(x, 560); ctx.stroke(); }
+  for(let y = 150; y <= 560; y += 68){ ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  // shelf with jars
+  ctx.fillStyle = "#8a5a2b"; rr(880, 196, 360, 14, 4); ctx.fill();
+  const jarCols = ["#c0392b", "#e67e22", "#27ae60", "#f2c94c", "#8a3b2a"];
+  for(let i = 0; i < 5; i++){
+    const jx = 905 + i * 68;
+    ctx.fillStyle = "rgba(255,252,240,.85)"; rr(jx, 158, 44, 40, 6); ctx.fill();
+    ctx.fillStyle = jarCols[i]; rr(jx + 5, 172, 34, 22, 4); ctx.fill();
+    ctx.fillStyle = "#5f3a17"; rr(jx + 8, 150, 28, 9, 3); ctx.fill();
+  }
+  text("DAPUR NUSANTARA", 1060, 428, 21, "#8a5a2b", "center", "bold");
+  // hanging lamps
+  [300, 640, 980].forEach((lx, i) => {
+    ctx.strokeStyle = "#4a2f16"; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(lx, 150); ctx.lineTo(lx, 196); ctx.stroke();
+    const glow = ctx.createRadialGradient(lx, 226, 6, lx, 226, 95);
+    glow.addColorStop(0, "rgba(255,196,64,.5)"); glow.addColorStop(1, "rgba(255,196,64,0)");
+    ctx.fillStyle = glow; circle(lx, 226, 95); ctx.fill();
+    ctx.fillStyle = "#3a2317"; ctx.beginPath();
+    ctx.moveTo(lx - 34, 226); ctx.lineTo(lx + 34, 226); ctx.lineTo(lx + 14, 192); ctx.lineTo(lx - 14, 192); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#ffd76a"; circle(lx, 232, 10 + Math.sin(performance.now()/300 + i) * 1.2); ctx.fill();
+  });
+  // wood counter block (mid area)
+  const wood = ctx.createLinearGradient(0, 470, 0, 640);
+  wood.addColorStop(0, "#a06a33"); wood.addColorStop(1, "#7c4f22");
+  ctx.fillStyle = wood; ctx.fillRect(0, 470, W, 170);
+  ctx.strokeStyle = "rgba(60,35,10,.35)"; ctx.lineWidth = 2;
+  for(let y = 500; y < 640; y += 34){ ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  ctx.fillStyle = "#5f3a17"; ctx.fillRect(0, 462, W, 10);
+}
+function drawOrderBoard(){
+  // board band
+  ctx.fillStyle = "#40260f"; ctx.fillRect(0, 0, W, 148);
+  const g = ctx.createLinearGradient(0, 0, 0, 148);
+  g.addColorStop(0, "rgba(255,210,110,.16)"); g.addColorStop(1, "rgba(0,0,0,.25)");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, 148);
+  ctx.fillStyle = "#ffd76a"; ctx.fillRect(0, 146, W, 3);
+  text("PESANAN", 66, 26, 17, "#ffd76a", "center", "bold");
+  if(S.orders.length === 0 && S.mode === "play")
+    text("menunggu pelanggan…", 640, 78, 24, "rgba(255,230,180,.5)");
+  S.orders.forEach((o, idx) => {
+    const x = 150 + idx * 372, y = 14, w = 352, h = 120;
+    ctx.fillStyle = "#fff8ea"; rr(x, y, w, h, 12); ctx.fill();
+    ctx.strokeStyle = RECIPES[o.dish].col; ctx.lineWidth = 3; rr(x, y, w, h, 12); ctx.stroke();
+    circle(x + 34, y + 34, 21); ctx.fillStyle = RECIPES[o.dish].col; ctx.fill();
+    drawIng(o.steps[0], x + 34, y + 34, 30);
+    text(o.dish, x + 62, y + 26, 21, "#40260f", "left", "bold");
+    text("Rp " + RECIPES[o.dish].price + "rb", x + 62, y + 50, 13, "#8a5a2b", "left", "bold");
+    // recipe steps
+    o.steps.forEach((st, i) => {
+      const sx = x + 34 + i * 52, sy = y + 92;
+      const done = S.plate[i] === st && platePrefixOf(o);
+      ctx.fillStyle = done ? "#d8f5d0" : "#f3e6cd"; circle(sx, sy, 19); ctx.fill();
+      ctx.strokeStyle = done ? "#27ae60" : "#c9a86a"; ctx.lineWidth = 2; circle(sx, sy, 19); ctx.stroke();
+      if(st === STOVE) drawFlame(sx, sy, 26, false);
+      else drawIng(st, sx, sy, 30);
+      if(i < o.steps.length - 1) text("›", sx + 26, sy, 20, "#b09a6a");
+    });
+    // patience bar
+    const frac = Math.max(0, o.patience / o.maxPatience);
+    ctx.fillStyle = "#e8dcc2"; rr(x + 196, y + 38, 140, 13, 6); ctx.fill();
+    ctx.fillStyle = frac > 0.5 ? "#27ae60" : (frac > 0.25 ? "#e67e22" : "#c0392b");
+    if(frac > 0){ rr(x + 196, y + 38, 140 * frac, 13, 6); ctx.fill(); }
+    if(frac <= 0.25 && S.mode === "play") text("!", x + w - 16, y + 20, 22, "#c0392b");
+  });
+}
+function platePrefixOf(o){
+  for(let i = 0; i < S.plate.length; i++) if(S.plate[i] !== o.steps[i]) return false;
+  return true;
+}
+function drawPlate(cx, cy, r, steps, glow){
+  // shadow + plate
+  ctx.fillStyle = "rgba(0,0,0,.28)"; ctx.beginPath(); ctx.ellipse(cx, cy + r * 0.82, r * 1.02, r * 0.24, 0, 0, Math.PI * 2); ctx.fill();
+  if(glow){
+    const g = ctx.createRadialGradient(cx, cy, r * 0.4, cx, cy, r * 1.65);
+    g.addColorStop(0, "rgba(255,215,106,.55)"); g.addColorStop(1, "rgba(255,215,106,0)");
+    ctx.fillStyle = g; circle(cx, cy, r * 1.65); ctx.fill();
+  }
+  const pg = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.35, r * 0.2, cx, cy, r);
+  pg.addColorStop(0, "#ffffff"); pg.addColorStop(0.8, "#f4efe2"); pg.addColorStop(1, "#d9d0b8");
+  ctx.fillStyle = pg; circle(cx, cy, r); ctx.fill();
+  ctx.strokeStyle = "#c9bfa4"; ctx.lineWidth = 3; circle(cx, cy, r * 0.8); ctx.stroke();
+  // food: rice/noodle base, then stacked ingredients
+  const food = steps.filter(s => s !== STOVE);
+  if(food.length){
+    const base = food.includes("rice") ? "#ffffff" : (food.includes("noodle") ? "#f2c94c" : "#efe6d0");
+    ctx.fillStyle = base; ctx.beginPath(); ctx.ellipse(cx, cy + r * 0.08, r * 0.62, r * 0.44, 0, 0, Math.PI * 2); ctx.fill();
+    food.forEach((id, i) => {
+      const a = i * 2.4, rad = (i % 3) * r * 0.16;
+      drawIng(id, cx + Math.cos(a) * rad - r * 0.1 + (i % 2) * r * 0.18, cy - r * 0.05 + Math.sin(a) * rad * 0.6, r * 0.62);
+    });
+    if(steps.includes(STOVE)){
+      ctx.strokeStyle = "rgba(160,64,20,.5)"; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.ellipse(cx, cy + r * 0.08, r * 0.55, r * 0.36, 0, 0.4, Math.PI - 0.6); ctx.stroke();
+      ctx.beginPath(); ctx.ellipse(cx, cy + r * 0.08, r * 0.45, r * 0.28, 0, Math.PI + 0.4, Math.PI * 2 - 0.6); ctx.stroke();
+    }
+  } else {
+    text("piring kosong", cx, cy, 15, "#b6ab90", "center", "bold");
+  }
+}
+function drawStove(){
+  const x = 952, y = 438, w = 268, h = 118;
+  ctx.fillStyle = "#33393f"; rr(x, y, w, h, 14); ctx.fill();
+  ctx.fillStyle = "#22262a"; rr(x, y, w, 34, 14); ctx.fill();
+  text(S.cooking ? "MEMASAK…" : (S.cookedReady ? "MATANG!" : "KOMPOR"), x + w/2, y + 18, 15, "#ffd76a");
+  // burner
+  ctx.fillStyle = "#17191c"; circle(x + 76, y + 78, 36); ctx.fill();
+  ctx.strokeStyle = "#4c545c"; ctx.lineWidth = 4; circle(x + 76, y + 78, 28); ctx.stroke();
+  if(S.cooking || S.cookedReady){
+    drawFlame(x + 76, y + 82, 50, true);
+    ctx.fillStyle = "#5a4632"; ctx.beginPath(); ctx.ellipse(x + 76, y + 56, 34, 12, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#8a6a44"; ctx.beginPath(); ctx.ellipse(x + 76, y + 52, 30, 10, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  // timer ring
+  const rx = x + 178, ry = y + 78;
+  ctx.strokeStyle = "#20242a"; ctx.lineWidth = 11; circle(rx, ry, 34); ctx.stroke();
+  if(S.cooking){
+    const t = S.cooking.t / S.cooking.dur;
+    ctx.strokeStyle = "#27ae60";
+    ctx.beginPath(); ctx.arc(rx, ry, 34, -Math.PI/2 + Math.PI*2*GREEN_A, -Math.PI/2 + Math.PI*2*GREEN_B); ctx.stroke();
+    ctx.strokeStyle = "#c0392b";
+    ctx.beginPath(); ctx.arc(rx, ry, 34, -Math.PI/2 + Math.PI*2*GREEN_B, -Math.PI/2 + Math.PI*2); ctx.stroke();
+    ctx.strokeStyle = "#ffd76a"; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.arc(rx, ry, 34, -Math.PI/2, -Math.PI/2 + Math.PI*2*t); ctx.stroke();
+    text(Math.round(t * 100) + "%", rx, ry, 16, "#fff");
+  } else if(S.cookedReady){
+    ctx.strokeStyle = "#27ae60"; ctx.lineWidth = 6; circle(rx, ry, 34); ctx.stroke();
+    text("OK!", rx, ry, 17, "#7be495");
+  } else {
+    text("klik /", rx, ry - 9, 13, "#9aa4ac");
+    text("SPASI", rx, ry + 10, 13, "#9aa4ac");
+  }
+  return {x, y, w, h};
+}
+function drawCounter(){
+  // ingredient cards along the bottom
+  const y = 652, w = 138, h = 128, gap = 12, x0 = (W - (w * 8 + gap * 7)) / 2;
+  ING.forEach((ing, i) => {
+    const x = x0 + i * (w + gap);
+    const target = S.mode === "play" && nextNeeded() && nextNeeded().step === ing.id;
+    ctx.fillStyle = target ? "#fff3cf" : "#fdf6e3"; rr(x, y, w, h, 14); ctx.fill();
+    ctx.strokeStyle = target ? "#f39c12" : "#caa96e"; ctx.lineWidth = target ? 4 : 2; rr(x, y, w, h, 14); ctx.stroke();
+    ctx.fillStyle = ing.col; circle(x + w/2, y + 44, 30); ctx.fill();
+    ctx.strokeStyle = ing.dark; ctx.lineWidth = 2; circle(x + w/2, y + 44, 30); ctx.stroke();
+    drawIng(ing.id, x + w/2, y + 44, 42);
+    text(ing.name, x + w/2, y + 92, ing.name.length > 11 ? 13.5 : 15, "#40260f");
+    ctx.fillStyle = "#40260f"; rr(x + w/2 - 13, y + 104, 26, 18, 5); ctx.fill();
+    text(ing.key, x + w/2, y + 113, 12, "#ffd76a");
+    ing._box = {x, y, w, h};
+  });
+  return {x0, y, w, h, gap};
+}
+function drawHUD(){
+  ctx.fillStyle = "rgba(40,22,6,.88)"; rr(18, 560, 330, 78, 12); ctx.fill();
+  text("SKOR " + S.score, 40, 584, 24, "#ffd76a", "left", "bold");
+  text("Koin: " + S.coins + "   Terjual: " + S.served, 40, 616, 16, "#ffe9bd", "left", "bold");
+  // shift timer
+  const frac = Math.max(0, S.time / 90);
+  ctx.fillStyle = "rgba(40,22,6,.88)"; rr(932, 560, 330, 78, 12); ctx.fill();
+  text("SISA WAKTU  " + Math.ceil(S.time) + "s", 954, 584, 20, "#fff", "left", "bold");
+  ctx.fillStyle = "#5f3a17"; rr(954, 602, 286, 16, 8); ctx.fill();
+  ctx.fillStyle = frac > 0.3 ? "#27ae60" : "#c0392b";
+  if(frac > 0){ rr(954, 602, 286 * frac, 16, 8); ctx.fill(); }
+  text("Level " + S.level + (S.combo > 1 ? "   ·   KOMBO x" + S.combo : ""), 640, 576, 19, "#40260f", "center", "bold");
+}
+let stoveBox = null;
+function drawScene(){
+  ctx.clearRect(0, 0, W, H);
+  drawKitchen();
+  drawOrderBoard();
+  drawHUD();
+  // main plate, centre
+  const target = S.mode === "play" ? nextNeeded() : null;
+  const ready = S.orders.some(o => plateMatches(o));
+  drawPlate(500, 402, 108, S.plate, ready || S.flashServe > 0);
+  text("PIRINGMU", 500, 540, 15, "#5f3a17");
+  if(target && S.mode === "play"){
+    const label = target.step === STOVE ? "berikutnya: KOMPOR!" : "berikutnya: " + ING_BY_ID[target.step].name;
+    ctx.fillStyle = "rgba(255,248,234,.92)"; rr(330, 288, 340, 34, 17); ctx.fill();
+    text(label, 500, 305, 17, "#7e1f14");
+  }
+  if(S.burnt){
+    ctx.fillStyle = "rgba(30,10,5,.55)"; circle(500, 402, 108); ctx.fill();
+    text("GOSONG!", 500, 392, 30, "#ff8a70");
+    text("buang ke tempat sampah", 500, 424, 15, "#ffd9cf");
+  }
+  stoveBox = drawStove();
+  // staged finished plate (screenshot mode)
+  if(S.readyPlate) drawPlate(806, 402, 74, S.readyPlate, true);
+  if(S.readyPlate) text("SIAP SAJI!", 806, 540, 15, "#1e8449");
+  drawCounter();
+  drawButtons();
+  // popups
+  S.popups.forEach(p => {
+    ctx.globalAlpha = Math.max(0, 1 - p.t / 1.1);
+    text(p.str, p.x, p.y - p.t * 46, 25, p.col);
+    ctx.globalAlpha = 1;
+  });
+}
+function drawButtons(){
+  // SERVE
+  const ready = S.orders.some(o => plateMatches(o));
+  ctx.fillStyle = ready ? "#27ae60" : "#7f8c8d"; rr(392, 560, 216, 78, 14); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,.18)"; rr(392, 560, 216, 34, 14); ctx.fill();
+  text("SAJIKAN", 500, 592, 27, "#ffffff");
+  text("SPASI", 500, 622, 12, "rgba(255,255,255,.75)");
+  S._serveBox = {x: 392, y: 560, w: 216, h: 78};
+  // TRASH
+  ctx.fillStyle = "#8a4a2f"; rr(632, 560, 130, 78, 14); ctx.fill();
+  ctx.fillStyle = "#6e3a22"; rr(672, 576, 50, 44, 6); ctx.fill();
+  ctx.fillStyle = "#542c16"; rr(664, 568, 66, 10, 4); ctx.fill();
+  text("BUANG", 697, 622, 12, "#ffd9bd");
+  S._trashBox = {x: 632, y: 560, w: 130, h: 78};
+  // PAUSE hint
+  if(S.mode === "play") text("P / Esc: jeda", 1246, 660, 13, "rgba(64,38,15,.55)", "right", "bold");
+}
+/* ---------------- Actions ---------------- */
+function addIngredient(id){
+  if(S.mode !== "play" || S.paused || S.burnt || S.cooking) return;
+  if(S.plate.length >= 6) { sfx.bad(); return; }
+  S.plate.push(id);
+  const t = nextNeeded();
+  if(t && t.step !== id && !(S.plate.length && platePrefixOf(t.order) === false && false)) { /* forgiving: only buzz if it breaks every order */ }
+  const anyPrefix = S.orders.some(o => platePrefixOf(o));
+  if(!anyPrefix){ sfx.bad(); S.shake = 0.25; popup(500, 300, "tidak cocok!", "#c0392b"); }
+  else sfx.pick();
+}
+function stoveClick(){
+  if(S.mode !== "play" || S.paused || S.burnt) return;
+  if(S.cooking){
+    const t = S.cooking.t / S.cooking.dur;
+    sizzle(false); S.cooking = null;
+    if(t >= GREEN_A && t <= GREEN_B){
+      S.cookedReady = true; S.plate.push(STOVE); sfx.ding();
+      popup(1010, 440, "matang sempurna!", "#27ae60");
+    } else if(t < GREEN_A){
+      S.cookedReady = true; S.plate.push(STOVE); sfx.pop();
+      popup(1010, 440, "kurang matang…", "#e67e22");
+    } else { burnPlate(); }
+    return;
+  }
+  if(S.cookedReady) return;
+  const t = nextNeeded();
+  if(t && t.step === STOVE){
+    S.cooking = {t: 0, dur: COOK_DUR}; sizzle(true); sfx.pop();
+  } else { sfx.bad(); popup(1010, 440, "belum waktunya!", "#c0392b"); }
+}
+function burnPlate(){
+  S.burnt = true; sfx.bad(); popup(500, 330, "GOSONG!", "#c0392b");
+}
+function trashPlate(){
+  if(S.mode !== "play" || S.paused) return;
+  S.plate = []; S.burnt = false; S.cookedReady = false;
+  if(S.cooking){ sizzle(false); S.cooking = null; }
+  S.combo = 0; sfx.trash();
+}
+function serve(){
+  if(S.mode !== "play" || S.paused || S.burnt) return;
+  const idx = S.orders.findIndex(o => plateMatches(o));
+  if(idx < 0){ sfx.bad(); S.shake = 0.25; popup(500, 300, "belum ada pesanan yang cocok", "#c0392b"); return; }
+  const o = S.orders[idx];
+  const frac = Math.max(0, o.patience / o.maxPatience);
+  S.combo++;
+  S.bestCombo = Math.max(S.bestCombo, S.combo);
+  const bonus = Math.round(RECIPES[o.dish].price * frac * 0.6);
+  const mult = 1 + Math.min(4, S.combo - 1) * 0.25;
+  const gain = Math.round((RECIPES[o.dish].price + bonus) * mult);
+  S.coins += gain; S.score += gain * 10; S.served++;
+  S.orders.splice(idx, 1);
+  S.plate = []; S.cookedReady = false; S.flashServe = 0.5;
+  sfx.coin(); setTimeout(() => sfx.ding(), 60);
+  popup(500, 268, "+" + gain + " koin · " + o.dish, "#1e8449");
+  if(S.combo > 1) popup(500, 300, "KOMBO x" + S.combo, "#d35400");
+  if(S.served % 5 === 0){ S.level++; popup(640, 350, "LEVEL " + S.level + "!", "#7d3c98"); }
+  if(S.orders.length < 2) spawnOrder();
+}
+
+/* ---------------- Update ---------------- */
+let lastT = performance.now();
+function update(dt){
+  if(S.mode === "shot") return; // staged scene: frozen exactly as set up
+  if(S.mode !== "play" || S.paused) { updateFx(dt); return; }
+  S.elapsed += dt;
+  S.time -= dt;
+  if(S.time <= 0){ S.time = 0; S.mode = "over"; sizzle(false); sfx.leave(); updateFx(dt); return; }
+  S.spawnT -= dt;
+  if(S.spawnT <= 0){ spawnOrder(); S.spawnT = 2.6 + Math.random() * 2.4; }
+  for(let i = S.orders.length - 1; i >= 0; i--){
+    const o = S.orders[i];
+    o.patience -= dt;
+    if(o.patience <= 0){
+      S.orders.splice(i, 1); S.combo = 0; sfx.leave();
+      popup(200 + i * 360, 180, "pelanggan pergi!", "#c0392b");
+    }
+  }
+  if(S.cooking){
+    S.cooking.t += dt;
+    if(S.cooking.t >= S.cooking.dur){ sizzle(false); S.cooking = null; burnPlate(); }
+  }
+  updateFx(dt);
+}
+function updateFx(dt){
+  S.popups.forEach(p => p.t += dt);
+  S.popups = S.popups.filter(p => p.t < 1.15);
+  if(S.shake > 0) S.shake -= dt;
+  if(S.flashServe > 0) S.flashServe -= dt;
+}
+
+/* ---------------- Screens ---------------- */
+function drawTitle(){
+  drawKitchen(); drawOrderBoard();
+  ctx.fillStyle = "rgba(29,14,4,.55)"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#fff8ea"; rr(340, 208, 600, 380, 24); ctx.fill();
+  ctx.strokeStyle = "#c0392b"; ctx.lineWidth = 5; rr(340, 208, 600, 380, 24); ctx.stroke();
+  drawIng("spice", 640, 268, 54);
+  text("RENDANG RUSH", 640, 330, 56, "#7e1f14", "center", "bold");
+  text("· Dapur Nusantara ·", 640, 372, 22, "#b9770e");
+  text("Racik rendang, nasi goreng, sate & mie goreng", 640, 420, 19, "#40260f");
+  text("sebelum pelanggan kehabisan sabar!", 640, 448, 19, "#40260f");
+  text("Klik bahan sesuai urutan resep · masak di kompor,", 640, 486, 15.5, "#8a6a44");
+  text("angkat di zona hijau · lalu SAJIKAN. 90 detik per shift!", 640, 508, 15.5, "#8a6a44");
+  ctx.fillStyle = "#27ae60"; rr(520, 528, 240, 52, 14); ctx.fill();
+  text("▶  MAIN", 640, 555, 26, "#ffffff");
+  S._playBox = {x: 520, y: 528, w: 240, h: 52};
+}
+function drawOver(){
+  drawScene();
+  ctx.fillStyle = "rgba(29,14,4,.62)"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#fff8ea"; rr(390, 218, 500, 340, 24); ctx.fill();
+  ctx.strokeStyle = "#b9770e"; ctx.lineWidth = 5; rr(390, 218, 500, 340, 24); ctx.stroke();
+  text("SHIFT SELESAI!", 640, 282, 42, "#7e1f14");
+  text("Skor akhir", 640, 338, 18, "#8a6a44");
+  text(String(S.score), 640, 384, 54, "#40260f");
+  text("Koin terkumpul: " + S.coins + "   ·   Hidangan terjual: " + S.served, 640, 436, 18, "#40260f");
+  text("Kombo terbaik: x" + Math.max(1, S.bestCombo) + "   ·   Level " + S.level, 640, 466, 18, "#40260f");
+  ctx.fillStyle = "#27ae60"; rr(520, 492, 240, 52, 14); ctx.fill();
+  text("↻  MAIN LAGI", 640, 519, 24, "#ffffff");
+  S._playBox = {x: 520, y: 492, w: 240, h: 52};
+}
+function drawPaused(){
+  ctx.fillStyle = "rgba(29,14,4,.55)"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#fff8ea"; rr(490, 320, 300, 130, 20); ctx.fill();
+  text("JEDA", 640, 366, 36, "#7e1f14");
+  text("tekan P / Esc untuk lanjut", 640, 410, 16, "#8a6a44");
+}
+function frame(now){
+  const dt = Math.min(0.05, (now - lastT) / 1000); lastT = now;
+  update(dt);
+  ctx.save();
+  if(S.shake > 0) ctx.translate((Math.random() - 0.5) * 10 * S.shake * 4, 0);
+  if(S.mode === "title") drawTitle();
+  else if(S.mode === "over") drawOver();
+  else { drawScene(); if(S.paused) drawPaused(); }
+  ctx.restore();
+  requestAnimationFrame(frame);
+}
+
+/* ---------------- Input ---------------- */
+function toGame(e){
+  const r = cv.getBoundingClientRect();
+  return {x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height};
+}
+function inBox(p, b){ return b && p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h; }
+cv.addEventListener("pointerdown", e => {
+  audio();
+  const p = toGame(e);
+  if(S.mode === "title" || S.mode === "over"){ if(inBox(p, S._playBox)){ resetGame(); S.mode = "play"; spawnOrder(); spawnOrder(); } return; }
+  if(S.mode !== "play") return;
+  if(S.paused){ S.paused = false; return; }
+  for(const ing of ING) if(ing._box && inBox(p, ing._box)){ addIngredient(ing.id); return; }
+  if(stoveBox && inBox(p, stoveBox)){ stoveClick(); return; }
+  if(inBox(p, S._serveBox)){ serve(); return; }
+  if(inBox(p, S._trashBox)){ trashPlate(); return; }
+});
+window.addEventListener("keydown", e => {
+  if(e.key === "Escape" || e.key.toLowerCase() === "p"){
+    if(S.mode === "play") S.paused = !S.paused; return;
+  }
+  if(S.mode === "title" || S.mode === "over"){
+    if(e.key === " " || e.key === "Enter"){ resetGame(); S.mode = "play"; spawnOrder(); spawnOrder(); }
+    return;
+  }
+  if(S.mode !== "play" || S.paused) return;
+  const ing = ING.find(i => i.key === e.key);
+  if(ing){ addIngredient(ing.id); return; }
+  if(e.key === " "){
+    e.preventDefault();
+    if(S.cooking || (nextNeeded() && nextNeeded().step === STOVE)) stoveClick();
+    else serve();
+  }
+  if(e.key === "Backspace" || e.key.toLowerCase() === "x") trashPlate();
+});
+
+/* ---------------- Screenshot staging ---------------- */
+const params = new URLSearchParams(location.search);
+const shot = params.get("shot");
+if(shot === "title"){
+  S.mode = "title";
+} else if(shot === "board" || shot === "serve"){
+  resetGame(); S.mode = "shot";
+  S.time = 63; S.score = 1250; S.coins = 214; S.served = 7; S.combo = 3; S.level = 2;
+  // two orders on the board
+  S.orders = [
+    {dish: "Rendang", steps: RECIPES["Rendang"].steps.slice(), patience: 17.5, maxPatience: 22},
+    {dish: "Nasi Goreng", steps: RECIPES["Nasi Goreng"].steps.slice(), patience: 10.5, maxPatience: 22},
+  ];
+  // plate mid-assembly: first two steps of the Rendang placed
+  S.plate = ["beef", "spice"];
+  // stove mid-cook, needle inside the green zone
+  S.cooking = {t: COOK_DUR * 0.7, dur: COOK_DUR};
+  // a finished plate waiting on the pass
+  S.readyPlate = ["rice", "kecap", "egg", STOVE];
+  if(shot === "serve"){
+    S.plate = ["beef", "spice", "santan", STOVE];
+    popup(500, 268, "+96 koin · Rendang", "#1e8449");
+    S.popups[0].t = 0.35;
+    S.flashServe = 1;
+  }
+} else if(shot === "over"){
+  resetGame(); S.mode = "over";
+  S.score = 3420; S.coins = 486; S.served = 12; S.bestCombo = 5; S.level = 3;
+  S.orders = [{dish: "Sate Ayam", steps: RECIPES["Sate Ayam"].steps.slice(), patience: 9, maxPatience: 20}];
+  S.plate = ["chicken"];
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
